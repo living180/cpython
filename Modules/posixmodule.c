@@ -1586,12 +1586,12 @@ attributes_from_dir_w(LPCWSTR pszFile, BY_HANDLE_FILE_INFORMATION *info, ULONG *
 static int has_GetFinalPathNameByHandle = -1;
 static DWORD (CALLBACK *Py_GetFinalPathNameByHandleW)(HANDLE, LPWSTR, DWORD,
                                                       DWORD);
+static DWORD (CALLBACK *Py_GetFinalPathNameByHandleA)(HANDLE, LPSTR, DWORD,
+                                                      DWORD);
 static int
 check_GetFinalPathNameByHandle()
 {
     HINSTANCE hKernel32;
-    DWORD (CALLBACK *Py_GetFinalPathNameByHandleA)(HANDLE, LPSTR, DWORD,
-                                                   DWORD);
 
     /* only recheck */
     if (-1 == has_GetFinalPathNameByHandle)
@@ -4847,7 +4847,7 @@ posix__getfullpathname(PyObject *self, PyObject *args)
 /*[clinic input]
 os._getfinalpathname
 
-    path: unicode
+    path : path_t
     /
 
 A helper function for samepath on windows.
@@ -4863,81 +4863,113 @@ PyDoc_STRVAR(os__getfinalpathname__doc__,
     {"_getfinalpathname", (PyCFunction)os__getfinalpathname, METH_VARARGS, os__getfinalpathname__doc__},
 
 static PyObject *
-os__getfinalpathname_impl(PyModuleDef *module, PyObject *path);
+os__getfinalpathname_impl(PyModuleDef *module, path_t *path);
 
 static PyObject *
 os__getfinalpathname(PyModuleDef *module, PyObject *args)
 {
     PyObject *return_value = NULL;
-    PyObject *path;
+    path_t path = PATH_T_INITIALIZE("_getfinalpathname", "path", 0, 0);
 
     if (!PyArg_ParseTuple(args,
-        "U:_getfinalpathname",
-        &path))
+        "O&:_getfinalpathname",
+        path_converter, &path))
         goto exit;
-    return_value = os__getfinalpathname_impl(module, path);
+    return_value = os__getfinalpathname_impl(module, &path);
 
 exit:
+    /* Cleanup for path */
+    path_cleanup(&path);
+
     return return_value;
 }
 
 static PyObject *
-os__getfinalpathname_impl(PyModuleDef *module, PyObject *path)
-/*[clinic end generated code: output=4563c6eacf1b0881 input=71d5e89334891bf4]*/
+os__getfinalpathname_impl(PyModuleDef *module, path_t *path)
+/*[clinic end generated code: output=73d616048bd8be5d input=bb30e839f01d1d5f]*/
 {
     HANDLE hFile;
     int buf_size;
-    wchar_t *target_path;
+    char *narrow_buffer;
+    wchar_t *wide_buffer;
     int result_length;
     PyObject *result;
-    wchar_t *path_wchar;
 
-    path_wchar = PyUnicode_AsUnicode(path);
-    if (path_wchar == NULL)
-        return NULL;
-
-    if(!check_GetFinalPathNameByHandle()) {
-        /* If the OS doesn't have GetFinalPathNameByHandle, return a
-           NotImplementedError. */
+    if (!check_GetFinalPathNameByHandle()) {
         return PyErr_Format(PyExc_NotImplementedError,
             "GetFinalPathNameByHandle not available on this platform");
     }
 
-    hFile = CreateFileW(
-        path_wchar,
-        0, /* desired access */
-        0, /* share mode */
-        NULL, /* security attributes */
-        OPEN_EXISTING,
-        /* FILE_FLAG_BACKUP_SEMANTICS is required to open a directory */
-        FILE_FLAG_BACKUP_SEMANTICS,
-        NULL);
+    if (path->wide)
+        hFile = CreateFileW(
+            path->wide,
+            0, /* desired access */
+            0, /* share mode */
+            NULL, /* security attributes */
+            OPEN_EXISTING,
+            /* FILE_FLAG_BACKUP_SEMANTICS is required to open a directory */
+            FILE_FLAG_BACKUP_SEMANTICS,
+            NULL);
+    else
+        hFile = CreateFileA(
+            path->narrow,
+            0, /* desired access */
+            0, /* share mode */
+            NULL, /* security attributes */
+            OPEN_EXISTING,
+            /* FILE_FLAG_BACKUP_SEMANTICS is required to open a directory */
+            FILE_FLAG_BACKUP_SEMANTICS,
+            NULL);
 
-    if(hFile == INVALID_HANDLE_VALUE)
-        return win32_error_object("CreateFileW", path);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return path_error(path);
 
     /* We have a good handle to the target, use it to determine the
        target path name. */
-    buf_size = Py_GetFinalPathNameByHandleW(hFile, 0, 0, VOLUME_NAME_NT);
+    if (path->wide)
+        buf_size = Py_GetFinalPathNameByHandleW(hFile, 0, 0, VOLUME_NAME_NT);
+    else
+        buf_size = Py_GetFinalPathNameByHandleA(hFile, 0, 0, VOLUME_NAME_NT);
 
-    if(!buf_size)
-        return win32_error_object("GetFinalPathNameByHandle", path);
+    if (!buf_size)
+        return path_error(path);
 
-    target_path = (wchar_t *)PyMem_Malloc((buf_size+1)*sizeof(wchar_t));
-    if(!target_path)
-        return PyErr_NoMemory();
+    if (path->wide) {
+        wide_buffer = (wchar_t *)PyMem_Malloc((buf_size + 1)
+                                              * sizeof(wchar_t));
+        if (!wide_buffer)
+            return PyErr_NoMemory();
 
-    result_length = Py_GetFinalPathNameByHandleW(hFile, target_path,
-                                                 buf_size, VOLUME_NAME_DOS);
-    if(!result_length)
-        return win32_error_object("GetFinalPathNamyByHandle", path);
+        result_length = Py_GetFinalPathNameByHandleW(hFile, wide_buffer,
+                                                     buf_size,
+                                                     VOLUME_NAME_DOS);
+    }
+    else {
+        narrow_buffer = (char *)PyMem_Malloc((buf_size + 1) * sizeof(char));
+        if (!narrow_buffer)
+            return PyErr_NoMemory();
 
-    if(!CloseHandle(hFile))
-        return win32_error_object("CloseHandle", path);
+        result_length = Py_GetFinalPathNameByHandleA(hFile, narrow_buffer,
+                                                     buf_size,
+                                                     VOLUME_NAME_DOS);
+    }
 
-    target_path[result_length] = 0;
-    result = PyUnicode_FromWideChar(target_path, result_length);
-    PyMem_Free(target_path);
+    if (!result_length)
+        return path_error(path);
+
+    if (!CloseHandle(hFile))
+        return path_error(path);
+
+    if (path->wide) {
+        wide_buffer[result_length] = 0;
+        result = PyUnicode_FromWideChar(wide_buffer, result_length);
+        PyMem_Free(wide_buffer);
+    }
+    else {
+        narrow_buffer[result_length] = 0;
+        result = PyBytes_FromStringAndSize(narrow_buffer, result_length);
+        PyMem_Free(narrow_buffer);
+    }
     return result;
 }
 
