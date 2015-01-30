@@ -10088,11 +10088,11 @@ exit:
 static PyObject *
 win_readlink(PyObject *self, PyObject *args, PyObject *kwargs)
 {
-    wchar_t *path;
+    path_t path = PATH_T_INITIALIZE("readlink", "path", 0, 0);
     DWORD n_bytes_returned;
     DWORD io_result;
-    PyObject *po, *result;
-        int dir_fd;
+    PyObject *unicode_result, *result = NULL;
+    int dir_fd;
     HANDLE reparse_point_handle;
 
     char target_buffer[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
@@ -10101,33 +10101,40 @@ win_readlink(PyObject *self, PyObject *args, PyObject *kwargs)
 
     static char *keywords[] = {"path", "dir_fd", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "U|$O&:readlink", keywords,
-                          &po,
-                          dir_fd_unavailable, &dir_fd
-                          ))
-        return NULL;
-
-    path = PyUnicode_AsUnicode(po);
-    if (path == NULL)
-        return NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O&|$O&:readlink", keywords,
+                          path_converter, &path,
+                          dir_fd_unavailable, &dir_fd))
+        goto exit;
 
     /* First get a handle to the reparse point */
     Py_BEGIN_ALLOW_THREADS
-    reparse_point_handle = CreateFileW(
-        path,
-        0,
-        0,
-        0,
-        OPEN_EXISTING,
-        FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS,
-        0);
+    if (path.wide)
+        reparse_point_handle = CreateFileW(
+            path.wide,
+            0,
+            0,
+            0,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            0);
+    else
+        reparse_point_handle = CreateFileA(
+            path.narrow,
+            0,
+            0,
+            0,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            0);
     Py_END_ALLOW_THREADS
 
-    if (reparse_point_handle==INVALID_HANDLE_VALUE)
-        return win32_error_object("readlink", po);
+    if (reparse_point_handle == INVALID_HANDLE_VALUE) {
+		result = path_error(&path);
+        goto exit;
+    }
 
     Py_BEGIN_ALLOW_THREADS
-    /* New call DeviceIoControl to read the reparse point */
+    /* Now call DeviceIoControl to read the reparse point */
     io_result = DeviceIoControl(
         reparse_point_handle,
         FSCTL_GET_REPARSE_POINT,
@@ -10139,20 +10146,31 @@ win_readlink(PyObject *self, PyObject *args, PyObject *kwargs)
     CloseHandle(reparse_point_handle);
     Py_END_ALLOW_THREADS
 
-    if (io_result==0)
-        return win32_error_object("readlink", po);
+    if (io_result == 0) {
+        result = path_error(&path);
+        goto exit;
+    }
 
     if (rdb->ReparseTag != IO_REPARSE_TAG_SYMLINK)
     {
         PyErr_SetString(PyExc_ValueError,
                 "not a symbolic link");
-        return NULL;
+        goto exit;
     }
     print_name = rdb->SymbolicLinkReparseBuffer.PathBuffer +
                  rdb->SymbolicLinkReparseBuffer.PrintNameOffset;
 
-    result = PyUnicode_FromWideChar(print_name,
-                    rdb->SymbolicLinkReparseBuffer.PrintNameLength/2);
+    unicode_result = PyUnicode_FromWideChar(print_name,
+                    rdb->SymbolicLinkReparseBuffer.PrintNameLength / 2);
+    if (unicode_result)
+        if (path.wide)
+            result = unicode_result;
+        else {
+            result = PyUnicode_EncodeFSDefault(unicode_result);
+            Py_DECREF(unicode_result);
+        }
+exit:
+    path_cleanup(&path);
     return result;
 }
 
