@@ -213,6 +213,26 @@ class TestNtpath(unittest.TestCase):
         tester("ntpath.normpath('\\\\.\\NUL')", r'\\.\NUL')
         tester("ntpath.normpath('\\\\?\\D:/XY\\Z')", r'\\?\D:/XY\Z')
 
+    def test_realpath_curdir(self):
+        cwd = ntpath.abspath('.')
+        tester("ntpath.realpath('.')", cwd)
+        tester("ntpath.realpath('./.')", cwd)
+        tester("ntpath.realpath('/'.join(['.'] * 100))", cwd)
+        tester("ntpath.realpath('.\\.')", cwd)
+        tester("ntpath.realpath('\\'.join(['.'] * 100))", cwd)
+
+    def test_realpath_pardir(self):
+        cwd = ntpath.abspath('.')
+        tester("ntpath.realpath('..')", ntpath.dirname(cwd))
+        tester("ntpath.realpath('../..')",
+               ntpath.dirname(ntpath.dirname(cwd)))
+        tester("ntpath.realpath('/'.join(['..'] * 50))",
+               ntpath.splitdrive(cwd)[0] + '\\')
+        tester("ntpath.realpath('..\\..')",
+               ntpath.dirname(ntpath.dirname(cwd)))
+        tester("ntpath.realpath('\\'.join(['..'] * 50))",
+               ntpath.splitdrive(cwd)[0] + '\\')
+
     def test_expandvars(self):
         with support.EnvironmentVarGuard() as env:
             env.clear()
